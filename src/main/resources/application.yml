@@ -1,0 +1,128 @@
+spring:
+  application:
+    name: data-processing-service
+
+  # Elasticsearch configuration
+  elasticsearch:
+    uris: ${ELASTICSEARCH_URIS:http://localhost:9200}
+    username: ${ELASTICSEARCH_USERNAME:}
+    password: ${ELASTICSEARCH_PASSWORD:}
+    socket-timeout: 30s
+    connection-timeout: 10s
+
+  # Redis configuration (for caching)
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 8
+          min-idle: 2
+
+  # Kafka configuration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: data-processing-service
+      auto-offset-reset: ${KAFKA_AUTO_OFFSET_RESET:earliest}
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "*"
+        max.poll.records: 10
+        session.timeout.ms: 30000
+        heartbeat.interval.ms: 3000
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        acks: 1
+        retries: 3
+        batch.size: 16384
+        linger.ms: 10
+
+# Processing service configuration
+processing:
+  kafka:
+    consumer-group-id: ${KAFKA_CONSUMER_GROUP:data-processing-service}
+    auto-offset-reset: ${KAFKA_AUTO_OFFSET_RESET:earliest}
+    max-poll-records: ${KAFKA_MAX_POLL_RECORDS:10}
+    poll-timeout: ${KAFKA_POLL_TIMEOUT:PT30S}
+    topics:
+      news-ingested: ${KAFKA_TOPIC_NEWS_INGESTED:news-ingested}
+      high-risk-detected: ${KAFKA_TOPIC_HIGH_RISK:high-risk-detected}
+      output:
+        article-processed: ${KAFKA_TOPIC_ARTICLE_PROCESSED:article-processed}
+        entity-extracted: ${KAFKA_TOPIC_ENTITY_EXTRACTED:entity-extracted}
+        location-detected: ${KAFKA_TOPIC_LOCATION_DETECTED:location-detected}
+        sentiment-analyzed: ${KAFKA_TOPIC_SENTIMENT_ANALYZED:sentiment-analyzed}
+
+  nlp:
+    stanford:
+      models-path: ${NLP_MODELS_PATH:/models/stanford-corenlp}
+      annotators:
+        - "tokenize"
+        - "ssplit"
+        - "pos"
+        - "lemma"
+        - "ner"
+      timeout: ${NLP_TIMEOUT:30}
+      enable-cache: ${NLP_ENABLE_CACHE:true}
+
+    geographic:
+      geonames-api-key: ${GEONAMES_API_KEY:demo}
+      geonames-base-url: ${GEONAMES_BASE_URL:http://api.geonames.org}
+      cache-ttl: ${GEO_CACHE_TTL:PT24H}
+      max-retries: ${GEO_MAX_RETRIES:3}
+
+    sentiment:
+      approach: ${SENTIMENT_APPROACH:rule-based}
+      neutral-threshold: ${SENTIMENT_NEUTRAL_THRESHOLD:0.1}
+      enable-aspect-sentiment: ${SENTIMENT_ENABLE_ASPECTS:true}
+
+  elasticsearch:
+    cluster-name: ${ES_CLUSTER_NAME:conflictradar}
+    indices:
+      articles: ${ES_INDEX_ARTICLES:articles}
+      entities: ${ES_INDEX_ENTITIES:entities}
+      locations: ${ES_INDEX_LOCATIONS:locations}
+      analytics: ${ES_INDEX_ANALYTICS:analytics}
+    indexing:
+      batch-size: ${ES_BATCH_SIZE:100}
+      flush-interval: ${ES_FLUSH_INTERVAL:PT30S}
+      max-retries: ${ES_MAX_RETRIES:3}
+      enable-refresh: ${ES_ENABLE_REFRESH:false}
+
+  performance:
+    thread-pool-size: ${PROCESSING_THREAD_POOL:4}
+    queue-capacity: ${PROCESSING_QUEUE_CAPACITY:100}
+    processing-timeout: ${PROCESSING_TIMEOUT:PT2M}
+    enable-metrics: ${PROCESSING_ENABLE_METRICS:true}
+
+# Actuator endpoints
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+# Logging configuration
+logging:
+  level:
+    io.conflictradar: ${LOG_LEVEL:INFO}
+    org.springframework.kafka: ${KAFKA_LOG_LEVEL:WARN}
+    org.elasticsearch: ${ES_LOG_LEVEL:WARN}
+    edu.stanford.nlp: ${NLP_LOG_LEVEL:WARN}
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level [%X{correlationId}] %logger{36} - %msg%n"
