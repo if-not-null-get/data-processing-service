@@ -1,0 +1,47 @@
+spring:
+  kafka:
+    bootstrap-servers: localhost:9093
+    consumer:
+      group-id: test-processing-service
+      auto-offset-reset: earliest
+
+processing:
+  kafka:
+    consumer-group-id: test-processing-service
+    max-poll-records: 1
+    poll-timeout: PT5S
+    topics:
+      news-ingested: news-ingested-test
+      output:
+        article-processed: article-processed-test
+        entity-extracted: entity-extracted-test
+        location-detected: location-detected-test
+        sentiment-analyzed: sentiment-analyzed-test
+
+  nlp:
+    stanford:
+      models-path: /tmp/test-models
+      timeout: 10
+      enable-cache: false
+    geographic:
+      geonames-api-key: test-key
+      cache-ttl: PT1M
+      max-retries: 1
+    sentiment:
+      approach: rule-based
+      neutral-threshold: 0.1
+
+  elasticsearch:
+    indices:
+      articles: test-articles
+      entities: test-entities
+      locations: test-locations
+    indexing:
+      batch-size: 1
+      flush-interval: PT1S
+      enable-refresh: true
+
+logging:
+  level:
+    io.conflictradar: DEBUG
+    org.apache.kafka: WARN

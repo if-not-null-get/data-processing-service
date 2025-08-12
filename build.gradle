@@ -51,8 +51,6 @@ dependencies {
     implementation 'edu.stanford.nlp:stanford-corenlp:4.5.4:models'
     implementation 'org.apache.opennlp:opennlp-tools:2.3.0'
 
-    implementation 'org.geonames:geonames-ws-client:1.1.14'
-
     implementation 'org.apache.commons:commons-text:1.11.0'
     implementation 'commons-codec:commons-codec:1.15'
 
