@@ -1,94 +1,8 @@
 version: '3.8'
 
+# Self-sufficient Data Processing Service
+# Can run standalone OR connect to shared infrastructure
 services:
-  # Elasticsearch cluster
-  elasticsearch:
-    image: elasticsearch:8.11.0
-    container_name: conflictradar-elasticsearch
-    environment:
-      - discovery.type=single-node
-      - ES_JAVA_OPTS=-Xms1g -Xmx1g
-      - xpack.security.enabled=false
-      - xpack.security.enrollment.enabled=false
-    ports:
-      - "9200:9200"
-      - "9300:9300"
-    volumes:
-      - elasticsearch_data:/usr/share/elasticsearch/data
-    networks:
-      - conflictradar
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-
-  # Kibana for Elasticsearch visualization
-  kibana:
-    image: kibana:8.11.0
-    container_name: conflictradar-kibana
-    environment:
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
-    ports:
-      - "5601:5601"
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
-    networks:
-      - conflictradar
-
-  # Redis for caching
-  redis:
-    image: redis:7-alpine
-    container_name: conflictradar-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes
-    networks:
-      - conflictradar
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # Zookeeper for Kafka
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.4.0
-    container_name: conflictradar-zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    networks:
-      - conflictradar
-
-  # Kafka
-  kafka:
-    image: confluentinc/cp-kafka:7.4.0
-    container_name: conflictradar-kafka
-    depends_on:
-      - zookeeper
-    ports:
-      - "9092:9092"
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
-    networks:
-      - conflictradar
-    healthcheck:
-      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
 
   # Data Processing Service
   data-processing:
@@ -96,13 +10,6 @@ services:
     container_name: conflictradar-data-processing
     ports:
       - "8081:8080"
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     environment:
       - SPRING_PROFILES_ACTIVE=docker
       - ELASTICSEARCH_URIS=http://elasticsearch:9200
@@ -115,23 +22,115 @@ services:
       - nlp_models:/models
     networks:
       - conflictradar
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
 
-  # Optional: Kafka UI for monitoring
+  # Elasticsearch (local copy)
+  elasticsearch:
+    image: elasticsearch:8.11.0
+    container_name: data-processing-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
+    ports:
+      - "9201:9200"  # Разный порт!
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - conflictradar
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Redis (local copy)
+  redis:
+    image: redis:7-alpine
+    container_name: data-processing-redis
+    ports:
+      - "6380:6379"  # Разный порт!
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - conflictradar
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Zookeeper (local copy)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: data-processing-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - conflictradar
+
+  # Kafka (local copy)
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: data-processing-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9093:9092"  # Разный порт чтобы не конфликтовать!
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    networks:
+      - conflictradar
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Kafka UI for debugging
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
-    container_name: conflictradar-kafka-ui
+    container_name: data-processing-kafka-ui
     ports:
-      - "8080:8080"
+      - "8082:8080"  # Разный порт!
     environment:
-      - KAFKA_CLUSTERS_0_NAME=conflictradar
+      - KAFKA_CLUSTERS_0_NAME=DataProcessing
       - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:29092
     depends_on:
       - kafka
+    networks:
+      - conflictradar
+
+  # Kibana for Elasticsearch
+  kibana:
+    image: kibana:8.11.0
+    container_name: data-processing-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5602:5601"  # Разный порт!
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
     networks:
       - conflictradar
 
