@@ -5,6 +5,7 @@ import io.conflictradar.processing.dto.nlp.EntityExtractionResult;
 import io.conflictradar.processing.dto.nlp.ExtractedEntity;
 import io.conflictradar.processing.service.elasticsearch.ElasticsearchIndexingService;
 import io.conflictradar.processing.service.events.ProcessingEventPublisher;
+import io.conflictradar.processing.service.geo.GeoNamesService;
 import io.conflictradar.processing.service.nlp.NlpService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,13 +30,16 @@ public class ArticleProcessingService {
     private final NlpService nlpService;
     private final ElasticsearchIndexingService elasticsearchService;
     private final ProcessingEventPublisher eventPublisher;
+    private final GeoNamesService geoNamesService;
 
     public ArticleProcessingService(NlpService nlpService,
-                                  ElasticsearchIndexingService elasticsearchService,
-                                  ProcessingEventPublisher eventPublisher) {
+                                    ElasticsearchIndexingService elasticsearchService,
+                                    ProcessingEventPublisher eventPublisher,
+                                    GeoNamesService geoNamesService) {
         this.nlpService = nlpService;
         this.elasticsearchService = elasticsearchService;
         this.eventPublisher = eventPublisher;
+        this.geoNamesService = geoNamesService;
     }
 
     @KafkaListener(
@@ -105,9 +109,9 @@ public class ArticleProcessingService {
                 event.articleId(), totalTime, entityResult.entities().size(),
                 entityResult.getConflictRelevantEntities().size(),
                 calculateEnhancedRiskScore(event, entityResult));
-            if (indexingFuture != null) {
-                indexingFuture.join(); // Wait for Elasticsearch indexing
-            }
+        if (indexingFuture != null) {
+            indexingFuture.join(); // Wait for Elasticsearch indexing
+        }
 
         } catch (Exception e) {
             logger.error("Failed to process article {}: {}", event.articleId(), e.getMessage(), e);
@@ -183,15 +187,41 @@ public class ArticleProcessingService {
         logger.debug("Resolving geography for: {}", event.articleId());
 
         try {
-            var locations = entityResult.getLocations();
+            var locationEntities = entityResult.getLocations();
 
-            if (!locations.isEmpty()) {
+            if (!locationEntities.isEmpty()) {
                 logger.debug("Found {} location entities in article {}: {}",
-                        locations.size(), event.articleId(),
-                        locations.stream().map(ExtractedEntity::text).toList());
+                        locationEntities.size(), event.articleId(),
+                        locationEntities.stream().map(ExtractedEntity::text).toList());
 
-                // TODO: Resolve to coordinates using GeoNames API
-                // For now, just log the locations found
+                // Resolve locations to coordinates
+                GeoNamesService.GeographicResolutionResult geoResult =
+                        geoNamesService.resolveLocations(locationEntities);
+
+                if (geoResult.hasResults()) {
+                    logger.info("Geographic resolution for {}: primary={}, total={}, conflict zones={}",
+                            event.articleId(),
+                            geoResult.primaryLocation() != null ? geoResult.primaryLocation().name() : "none",
+                            geoResult.allLocations().size(),
+                            geoResult.getConflictZones().size());
+
+                    // Log conflict zones with high priority
+                    if (!geoResult.getConflictZones().isEmpty()) {
+                        logger.warn("CONFLICT ZONES detected in article {}: {}",
+                                event.articleId(),
+                                geoResult.getConflictZones().stream()
+                                        .map(loc -> loc.name() + " (" + loc.country() + ")")
+                                        .toList());
+                    }
+
+                    // Store in MDC for later use in event publishing
+                    MDC.put("primaryLocation", geoResult.primaryLocation() != null ?
+                            geoResult.primaryLocation().name() : "");
+                    MDC.put("primaryCoordinates", geoResult.getPrimaryCoordinates() != null ?
+                            geoResult.getPrimaryCoordinates() : "");
+                } else {
+                    logger.debug("No geographic coordinates resolved for article: {}", event.articleId());
+                }
             }
 
         } catch (Exception e) {
@@ -199,7 +229,7 @@ public class ArticleProcessingService {
         }
     }
 
-    private CompletableFuture<Void>  indexToElasticsearch(NewsIngestedEvent event, EntityExtractionResult entityResult) {
+    private CompletableFuture<Void> indexToElasticsearch(NewsIngestedEvent event, EntityExtractionResult entityResult) {
         logger.debug("Indexing to Elasticsearch: {}", event.articleId());
 
         try {
@@ -249,11 +279,14 @@ public class ArticleProcessingService {
         logger.debug("Publishing enhanced events for: {}", event.articleId());
 
         try {
-            // Extract geographic information
+            // Extract geographic information from MDC (set during resolveGeography)
+            String primaryLocation = MDC.get("primaryLocation");
+            String coordinates = MDC.get("primaryCoordinates");
+
+            // Extract all location names
             List<String> locations = entityResult.getLocations().stream()
                     .map(ExtractedEntity::text)
                     .toList();
-            String primaryLocation = locations.isEmpty() ? null : locations.get(0);
 
             // Calculate enhanced risk score
             double enhancedRiskScore = calculateEnhancedRiskScore(event, entityResult);
@@ -274,7 +307,7 @@ public class ArticleProcessingService {
                     entityResult,
                     enhancedRiskScore,
                     primaryLocation,
-                    null, // coordinates - TODO: resolve from GeoNames
+                    coordinates,
                     locations,
                     sentimentScore,
                     categories
@@ -291,9 +324,9 @@ public class ArticleProcessingService {
                                 event.articleId(), enhancedRiskScore);
                     }
 
-                    if (!locations.isEmpty() && primaryLocation != null) {
-                        logger.info("Geographic event published: {} -> {}",
-                                event.articleId(), primaryLocation);
+                    if (primaryLocation != null && !primaryLocation.isEmpty()) {
+                        logger.info("Geographic event published: {} -> {} ({})",
+                                event.articleId(), primaryLocation, coordinates != null ? coordinates : "no coords");
                     }
                 } else {
                     logger.error("Failed to publish some enhanced events for {}: {}",
