@@ -4,6 +4,7 @@ import io.conflictradar.processing.dto.input.NewsIngestedEvent;
 import io.conflictradar.processing.dto.nlp.EntityExtractionResult;
 import io.conflictradar.processing.dto.nlp.ExtractedEntity;
 import io.conflictradar.processing.service.elasticsearch.ElasticsearchIndexingService;
+import io.conflictradar.processing.service.events.ProcessingEventPublisher;
 import io.conflictradar.processing.service.nlp.NlpService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,6 +16,8 @@ import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -25,10 +28,14 @@ public class ArticleProcessingService {
 
     private final NlpService nlpService;
     private final ElasticsearchIndexingService elasticsearchService;
+    private final ProcessingEventPublisher eventPublisher;
 
-    public ArticleProcessingService(NlpService nlpService, ElasticsearchIndexingService elasticsearchService) {
+    public ArticleProcessingService(NlpService nlpService,
+                                  ElasticsearchIndexingService elasticsearchService,
+                                  ProcessingEventPublisher eventPublisher) {
         this.nlpService = nlpService;
         this.elasticsearchService = elasticsearchService;
+        this.eventPublisher = eventPublisher;
     }
 
     @KafkaListener(
@@ -242,16 +249,57 @@ public class ArticleProcessingService {
         logger.debug("Publishing enhanced events for: {}", event.articleId());
 
         try {
-            // TODO: Publish to Kafka topics:
-            // - article-processed (with entities and analysis)
-            // - entity-extracted (individual entities)
-            // - location-detected (geographic events)
-            // - sentiment-analyzed (sentiment scores)
+            // Extract geographic information
+            List<String> locations = entityResult.getLocations().stream()
+                    .map(ExtractedEntity::text)
+                    .toList();
+            String primaryLocation = locations.isEmpty() ? null : locations.get(0);
 
-            if (entityResult.hasHighPriorityConflictEntities()) {
-                logger.warn("Publishing HIGH-PRIORITY conflict event for article: {} with entities: {}",
-                        event.articleId(), entityResult.getConflictRelevantEntities().size());
+            // Calculate enhanced risk score
+            double enhancedRiskScore = calculateEnhancedRiskScore(event, entityResult);
+
+            // Simple sentiment analysis
+            double sentimentScore = event.conflictKeywords().isEmpty() ? 0.0 :
+                    -0.3 * Math.min(event.conflictKeywords().size(), 3);
+
+            // Determine categories
+            Set<String> categories = Set.of("conflict", "news");
+            if (!entityResult.getPersons().isEmpty()) {
+                categories = Set.of("conflict", "news", "political");
             }
+
+            // Publish all events
+            CompletableFuture<Void> publishingFuture = eventPublisher.publishAllEvents(
+                    event,
+                    entityResult,
+                    enhancedRiskScore,
+                    primaryLocation,
+                    null, // coordinates - TODO: resolve from GeoNames
+                    locations,
+                    sentimentScore,
+                    categories
+            );
+
+            // Log success/failure
+            publishingFuture.whenComplete((result, ex) -> {
+                if (ex == null) {
+                    logger.info("All enhanced events published for article: {}", event.articleId());
+
+                    // Log critical events
+                    if (enhancedRiskScore > 0.8) {
+                        logger.warn("CRITICAL RISK article published: {} (risk: {:.2f})",
+                                event.articleId(), enhancedRiskScore);
+                    }
+
+                    if (!locations.isEmpty() && primaryLocation != null) {
+                        logger.info("Geographic event published: {} -> {}",
+                                event.articleId(), primaryLocation);
+                    }
+                } else {
+                    logger.error("Failed to publish some enhanced events for {}: {}",
+                            event.articleId(), ex.getMessage());
+                }
+            });
 
         } catch (Exception e) {
             logger.error("Failed to publish enhanced events for article {}: {}", event.articleId(), e.getMessage(), e);
