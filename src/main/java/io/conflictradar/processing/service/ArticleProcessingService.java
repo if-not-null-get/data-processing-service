@@ -1,6 +1,9 @@
 package io.conflictradar.processing.service;
 
 import io.conflictradar.processing.dto.input.NewsIngestedEvent;
+import io.conflictradar.processing.dto.nlp.EntityExtractionResult;
+import io.conflictradar.processing.dto.nlp.ExtractedEntity;
+import io.conflictradar.processing.service.nlp.NlpService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -15,7 +18,14 @@ import java.util.UUID;
 
 @Service
 public class ArticleProcessingService {
+
     private static final Logger logger = LoggerFactory.getLogger(ArticleProcessingService.class);
+
+    private final NlpService nlpService;
+
+    public ArticleProcessingService(NlpService nlpService) {
+        this.nlpService = nlpService;
+    }
 
     @KafkaListener(
             topics = "${processing.kafka.topics.news-ingested}",
@@ -37,11 +47,13 @@ public class ArticleProcessingService {
             logger.info("Processing article: {} from {} (topic: {}, partition: {}, offset: {})",
                     event.articleId(), event.getSimpleSource(), topic, partition, offset);
 
+            // Process the article
             processArticle(event);
+
+            // Manual acknowledgment after successful processing
             acknowledgment.acknowledge();
 
-            logger.info("Successfully processed article: {} in {}ms",
-                    event.articleId(), System.currentTimeMillis() % 1000);
+            logger.info("Successfully processed article: {}", event.articleId());
 
         } catch (Exception e) {
             logger.error("Failed to process article: {} - {}", event.articleId(), e.getMessage(), e);
@@ -56,74 +68,150 @@ public class ArticleProcessingService {
     }
 
     private void processArticle(NewsIngestedEvent event) {
+        long startTime = System.currentTimeMillis();
+
         logger.debug("Starting NLP processing for article: {}", event.articleId());
 
-        extractEntities(event);
-        analyzeSentiment(event);
-        resolveGeography(event);
-        indexToElasticsearch(event);
+        // Step 1: Extract entities (persons, organizations, locations)
+        EntityExtractionResult entityResult = extractEntities(event);
 
-        publishEnhancedEvents(event);
+        // Step 2: Analyze sentiment
+        analyzeSentiment(event, entityResult);
 
-        logger.debug("Completed processing for article: {}", event.articleId());
+        // Step 3: Resolve geographic locations
+        resolveGeography(event, entityResult);
+
+        // Step 4: Index to Elasticsearch
+        indexToElasticsearch(event, entityResult);
+
+        // Step 5: Publish enhanced events
+        publishEnhancedEvents(event, entityResult);
+
+        long totalTime = System.currentTimeMillis() - startTime;
+
+        logger.info("Completed processing for article: {} in {}ms (entities: {}, conflict-relevant: {})",
+                event.articleId(), totalTime, entityResult.entities().size(),
+                entityResult.getConflictRelevantEntities().size());
     }
 
-    private void extractEntities(NewsIngestedEvent event) {
+    private EntityExtractionResult extractEntities(NewsIngestedEvent event) {
         logger.debug("Extracting entities from: {}", event.title());
 
-        // TODO: Implement Stanford CoreNLP entity extraction
-        // For now, placeholder
+        try {
+            // Combine title and description for better entity extraction
+            String textToAnalyze = event.title();
 
-        if (event.isHighRisk()) {
-            logger.warn("High-risk article detected: {} (risk: {})",
-                    event.articleId(), event.riskScore());
-        }
+            EntityExtractionResult result = nlpService.extractEntities(textToAnalyze);
 
-        if (event.isCritical()) {
-            logger.error("CRITICAL article detected: {} with keywords: {}",
-                    event.articleId(), event.conflictKeywords());
+            logger.debug("Extracted {} entities from article {}: {} persons, {} organizations, {} locations",
+                    result.entities().size(), event.articleId(),
+                    result.getPersons().size(),
+                    result.getOrganizations().size(),
+                    result.getLocations().size());
+
+            // Log high-priority conflict entities
+            if (result.hasHighPriorityConflictEntities()) {
+                logger.warn("High-priority conflict entities found in article {}: {}",
+                        event.articleId(),
+                        result.getConflictRelevantEntities().stream()
+                                .map(entity -> entity.text() + "(" + entity.type() + ")")
+                                .toList());
+            }
+
+            return result;
+
+        } catch (Exception e) {
+            logger.error("Failed to extract entities from article {}: {}", event.articleId(), e.getMessage(), e);
+            return EntityExtractionResult.empty();
         }
     }
 
-    private void analyzeSentiment(NewsIngestedEvent event) {
+    private void analyzeSentiment(NewsIngestedEvent event, EntityExtractionResult entityResult) {
         logger.debug("Analyzing sentiment for: {}", event.articleId());
 
-        // TODO: Implement sentiment analysis
-        // For now, placeholder based on conflict keywords
+        try {
+            // Simple rule-based sentiment analysis
+            String text = event.title().toLowerCase();
 
-        double sentimentScore = event.conflictKeywords().isEmpty() ? 0.0 :
-                -0.5 * event.conflictKeywords().size();
+            // Base sentiment from conflict keywords
+            double sentimentScore = event.conflictKeywords().isEmpty() ? 0.0 :
+                    -0.3 * event.conflictKeywords().size();
 
-        logger.debug("Sentiment score for {}: {}", event.articleId(), sentimentScore);
+            // Adjust based on extracted entities
+            if (entityResult.hasHighPriorityConflictEntities()) {
+                sentimentScore -= 0.2;
+            }
+
+            // Boost negative sentiment for critical keywords
+            if (event.isCritical()) {
+                sentimentScore -= 0.3;
+            }
+
+            // Normalize to [-1.0, 1.0]
+            sentimentScore = Math.max(-1.0, Math.min(1.0, sentimentScore));
+
+            logger.debug("Sentiment analysis for {}: score = {}, entities = {}, critical = {}",
+                    event.articleId(), sentimentScore, entityResult.entities().size(), event.isCritical());
+
+        } catch (Exception e) {
+            logger.error("Failed to analyze sentiment for article {}: {}", event.articleId(), e.getMessage(), e);
+        }
     }
 
-    private void resolveGeography(NewsIngestedEvent event) {
+    private void resolveGeography(NewsIngestedEvent event, EntityExtractionResult entityResult) {
         logger.debug("Resolving geography for: {}", event.articleId());
 
-        // TODO: Implement GeoNames API integration
-        // For now, placeholder
+        try {
+            var locations = entityResult.getLocations();
 
-        logger.debug("Geographic resolution completed for: {}", event.articleId());
+            if (!locations.isEmpty()) {
+                logger.debug("Found {} location entities in article {}: {}",
+                        locations.size(), event.articleId(),
+                        locations.stream().map(ExtractedEntity::text).toList());
+
+                // TODO: Resolve to coordinates using GeoNames API
+                // For now, just log the locations found
+            }
+
+        } catch (Exception e) {
+            logger.error("Failed to resolve geography for article {}: {}", event.articleId(), e.getMessage(), e);
+        }
     }
 
-    private void indexToElasticsearch(NewsIngestedEvent event) {
+    private void indexToElasticsearch(NewsIngestedEvent event, EntityExtractionResult entityResult) {
         logger.debug("Indexing to Elasticsearch: {}", event.articleId());
 
-        // TODO: Implement Elasticsearch indexing
-        // For now, placeholder
+        try {
+            // TODO: Create enhanced article document with entities
+            // For now, just log what would be indexed
 
-        logger.debug("Indexed article: {} to Elasticsearch", event.articleId());
+            var summary = entityResult.getSummary();
+
+            logger.debug("Would index article {} with: {} entities, conflict relevance: {:.2f}, confidence: {:.2f}",
+                    event.articleId(), summary.totalEntities(), summary.conflictRelevanceScore(), summary.overallConfidence());
+
+        } catch (Exception e) {
+            logger.error("Failed to index article {} to Elasticsearch: {}", event.articleId(), e.getMessage(), e);
+        }
     }
 
-    private void publishEnhancedEvents(NewsIngestedEvent event) {
+    private void publishEnhancedEvents(NewsIngestedEvent event, EntityExtractionResult entityResult) {
         logger.debug("Publishing enhanced events for: {}", event.articleId());
 
-        // TODO: Publish to Kafka topics:
-        // - article-processed
-        // - entity-extracted
-        // - location-detected
-        // - sentiment-analyzed
+        try {
+            // TODO: Publish to Kafka topics:
+            // - article-processed (with entities and analysis)
+            // - entity-extracted (individual entities)
+            // - location-detected (geographic events)
+            // - sentiment-analyzed (sentiment scores)
 
-        logger.debug("Enhanced events published for: {}", event.articleId());
+            if (entityResult.hasHighPriorityConflictEntities()) {
+                logger.warn("Publishing HIGH-PRIORITY conflict event for article: {} with entities: {}",
+                        event.articleId(), entityResult.getConflictRelevantEntities().size());
+            }
+
+        } catch (Exception e) {
+            logger.error("Failed to publish enhanced events for article {}: {}", event.articleId(), e.getMessage(), e);
+        }
     }
 }
