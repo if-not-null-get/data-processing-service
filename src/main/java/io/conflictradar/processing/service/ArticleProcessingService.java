@@ -3,6 +3,7 @@ package io.conflictradar.processing.service;
 import io.conflictradar.processing.dto.input.NewsIngestedEvent;
 import io.conflictradar.processing.dto.nlp.EntityExtractionResult;
 import io.conflictradar.processing.dto.nlp.ExtractedEntity;
+import io.conflictradar.processing.service.elasticsearch.ElasticsearchIndexingService;
 import io.conflictradar.processing.service.nlp.NlpService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,6 +16,7 @@ import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Service;
 
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 @Service
 public class ArticleProcessingService {
@@ -22,9 +24,11 @@ public class ArticleProcessingService {
     private static final Logger logger = LoggerFactory.getLogger(ArticleProcessingService.class);
 
     private final NlpService nlpService;
+    private final ElasticsearchIndexingService elasticsearchService;
 
-    public ArticleProcessingService(NlpService nlpService) {
+    public ArticleProcessingService(NlpService nlpService, ElasticsearchIndexingService elasticsearchService) {
         this.nlpService = nlpService;
+        this.elasticsearchService = elasticsearchService;
     }
 
     @KafkaListener(
@@ -72,6 +76,7 @@ public class ArticleProcessingService {
 
         logger.debug("Starting NLP processing for article: {}", event.articleId());
 
+        try {
         // Step 1: Extract entities (persons, organizations, locations)
         EntityExtractionResult entityResult = extractEntities(event);
 
@@ -82,16 +87,25 @@ public class ArticleProcessingService {
         resolveGeography(event, entityResult);
 
         // Step 4: Index to Elasticsearch
-        indexToElasticsearch(event, entityResult);
+        CompletableFuture<Void> indexingFuture = indexToElasticsearch(event, entityResult);
 
         // Step 5: Publish enhanced events
         publishEnhancedEvents(event, entityResult);
 
         long totalTime = System.currentTimeMillis() - startTime;
 
-        logger.info("Completed processing for article: {} in {}ms (entities: {}, conflict-relevant: {})",
+        logger.info("Completed processing for article: {} in {}ms (entities: {}, conflict-relevant: {}, enhanced-risk: {:.2f})",
                 event.articleId(), totalTime, entityResult.entities().size(),
-                entityResult.getConflictRelevantEntities().size());
+                entityResult.getConflictRelevantEntities().size(),
+                calculateEnhancedRiskScore(event, entityResult));
+            if (indexingFuture != null) {
+                indexingFuture.join(); // Wait for Elasticsearch indexing
+            }
+
+        } catch (Exception e) {
+            logger.error("Failed to process article {}: {}", event.articleId(), e.getMessage(), e);
+            throw e; // Re-throw to trigger retry logic if needed
+        }
     }
 
     private EntityExtractionResult extractEntities(NewsIngestedEvent event) {
@@ -178,21 +192,50 @@ public class ArticleProcessingService {
         }
     }
 
-    private void indexToElasticsearch(NewsIngestedEvent event, EntityExtractionResult entityResult) {
+    private CompletableFuture<Void>  indexToElasticsearch(NewsIngestedEvent event, EntityExtractionResult entityResult) {
         logger.debug("Indexing to Elasticsearch: {}", event.articleId());
 
         try {
-            // TODO: Create enhanced article document with entities
-            // For now, just log what would be indexed
+            // Index article with enhanced data
+            CompletableFuture<Void> indexingFuture = elasticsearchService.indexArticle(event, entityResult);
 
+            // Log enhanced metrics
+            double enhancedRiskScore = calculateEnhancedRiskScore(event, entityResult);
             var summary = entityResult.getSummary();
 
-            logger.debug("Would index article {} with: {} entities, conflict relevance: {:.2f}, confidence: {:.2f}",
-                    event.articleId(), summary.totalEntities(), summary.conflictRelevanceScore(), summary.overallConfidence());
+            logger.debug("Indexed article {} with enhanced data - Risk: {:.2f} -> {:.2f}, Entities: {}, Conflict Relevance: {:.2f}",
+                    event.articleId(), event.riskScore(), enhancedRiskScore,
+                    summary.totalEntities(), summary.conflictRelevanceScore());
+
+            return indexingFuture;
 
         } catch (Exception e) {
             logger.error("Failed to index article {} to Elasticsearch: {}", event.articleId(), e.getMessage(), e);
+            return CompletableFuture.completedFuture(null); // Don't fail the whole pipeline
         }
+    }
+
+    /**
+     * Calculate enhanced risk score (same logic as in ElasticsearchIndexingService)
+     */
+    private double calculateEnhancedRiskScore(NewsIngestedEvent event, EntityExtractionResult entityResult) {
+        double baseScore = event.riskScore();
+
+        // Boost based on entity analysis
+        double entityBoost = entityResult.getConflictRelevanceScore() * 0.3;
+
+        // Boost for high-priority conflict entities
+        if (entityResult.hasHighPriorityConflictEntities()) {
+            entityBoost += 0.2;
+        }
+
+        // Boost for multiple conflict entities
+        long conflictEntityCount = entityResult.getConflictRelevantEntities().size();
+        if (conflictEntityCount > 2) {
+            entityBoost += Math.min(conflictEntityCount * 0.05, 0.15);
+        }
+
+        return Math.min(baseScore + entityBoost, 1.0);
     }
 
     private void publishEnhancedEvents(NewsIngestedEvent event, EntityExtractionResult entityResult) {
