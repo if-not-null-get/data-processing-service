@@ -1,5 +1,7 @@
 package io.conflictradar.processing.api;
 
+import io.conflictradar.processing.service.geo.GeoNamesService;
+import io.conflictradar.processing.service.nlp.NlpService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -16,22 +18,36 @@ public class HealthController {
     @Value("${spring.application.name}")
     private String serviceName;
 
+    private final NlpService nlpService;
+    private final GeoNamesService geoNamesService;
+
+    public HealthController(NlpService nlpService, GeoNamesService geoNamesService) {
+        this.nlpService = nlpService;
+        this.geoNamesService = geoNamesService;
+    }
+
     @GetMapping("/health")
     public ResponseEntity<Map<String, Object>> health() {
+        boolean nlpReady = nlpService.isReady();
+        boolean geoReady = geoNamesService.isHealthy();
+        boolean overallHealthy = nlpReady && geoReady;
+
         var healthInfo = Map.of(
-                "status", "UP",
+                "status", overallHealthy ? "UP" : "DOWN",
                 "service", serviceName,
                 "timestamp", LocalDateTime.now(),
                 "version", "1.0.0",
                 "processing", Map.of(
                         "kafkaConsumerActive", true,
                         "elasticsearchConnected", true, // TODO: real health check
-                        "nlpModelsLoaded", false, // TODO: real check
-                        "geonamesApiReady", false // TODO: real check
+                        "nlpModelsLoaded", nlpReady,
+                        "geonamesApiReady", geoReady
                 )
         );
 
-        return ResponseEntity.ok(healthInfo);
+        return overallHealthy ?
+                ResponseEntity.ok(healthInfo) :
+                ResponseEntity.status(503).body(healthInfo);
     }
 
     @GetMapping("/status")
@@ -49,7 +65,8 @@ public class HealthController {
                         "elasticsearch", "Connected",
                         "kafka", "Consuming news-ingested",
                         "redis", "Caching entities",
-                        "nlpModels", "Loading..."
+                        "nlpModels", nlpService.isReady() ? "Ready" : "Loading...",
+                        "geonames", geoNamesService.isHealthy() ? "Ready" : "Unavailable"
                 )
         ));
     }

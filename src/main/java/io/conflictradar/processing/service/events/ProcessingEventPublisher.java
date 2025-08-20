@@ -105,7 +105,11 @@ public class ProcessingEventPublisher {
                     entityResult.processingTimeMs()
             );
 
-            String topic = config.kafka().topics().output().entityExtracted();
+            String topic = config
+                    .kafka()
+                    .topics()
+                    .output()
+                    .entityExtracted();
 
             CompletableFuture<SendResult<String, Object>> future =
                     kafkaTemplate.send(topic, event.articleId(), event);

@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.*;
 @Testcontainers
 //@ActiveProfiles("test")
 //@EnabledIfSystemProperty(named = "test.nlp.enabled", matches = "true")
-class NLPServiceIntegrationTest {
+class NlpServiceIntegrationTest {
     @Autowired
     private NlpService nlpService;
 
@@ -32,6 +32,32 @@ class NLPServiceIntegrationTest {
     static void configureProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.data.redis.host", redis::getHost);
         registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
+    }
+
+    @Test
+    @DisplayName("Should handle empty text without errors")
+    void shouldHandleEmptyTextWithoutErrors() {
+        EntityExtractionResult result = nlpService.extractEntities("");
+
+        assertThat(result).isNotNull();
+        assertThat(result.entities()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Should return test pipeline status")
+    void shouldReturnTestPipelineStatus() {
+        var status = nlpService.testPipeline();
+
+        assertThat(status).containsKey("ready");
+        assertThat(status).containsKey("testText");
+    }
+
+    @Test
+    @DisplayName("Should be ready or not ready without throwing")
+    void shouldBeReadyOrNotReadyWithoutThrowing() {
+        assertThatCode(() -> {
+            nlpService.isReady();
+        }).doesNotThrowAnyException();
     }
 
     @Test
